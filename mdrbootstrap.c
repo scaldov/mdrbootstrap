@@ -121,7 +121,6 @@ int rtty_set(int fd, int bpsconst)
 	struct termios opts;
 	tcgetattr(fd,&opts);
 	cfmakeraw(&opts);
-	//opts.c_cflag |= CS8|CSTOPB;
 	opts.c_cflag = CS8|CREAD|CLOCAL;
 	cfsetispeed(&opts,bpsconst);
 	cfsetospeed(&opts,bpsconst);
@@ -649,9 +648,13 @@ int main(int argc, char **argv)
 	//print_hex(fw_data, fw_base, fw_len);
 	printf("read .hex firmware\nbase=%08X, len=%i\n", fw_base, fw_len);
 	r = mdr_uart(dev, bps, boot_data, boot_len, boot_base);
-	if(r > 0) mdr_boot(dev, fw_data, fw_len, fw_base, run_fw);
+	if(r > 0) 
+		r=mdr_boot(dev, fw_data, fw_len, fw_base, run_fw);
 	close(dev);
-	return 0;
+	if (r>0)
+		return 0;
+	else
+		return -1;
 }
 
 /*
