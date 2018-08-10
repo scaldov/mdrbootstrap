@@ -121,7 +121,8 @@ int rtty_set(int fd, int bpsconst)
 	struct termios opts;
 	tcgetattr(fd,&opts);
 	cfmakeraw(&opts);
-	opts.c_cflag |= CS8|CSTOPB;
+	//opts.c_cflag |= CS8|CSTOPB;
+	opts.c_cflag = CS8|CREAD|CLOCAL;
 	cfsetispeed(&opts,bpsconst);
 	cfsetospeed(&opts,bpsconst);
 	tcsetattr(fd, TCSADRAIN, &opts);
