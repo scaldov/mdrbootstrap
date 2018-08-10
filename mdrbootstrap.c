@@ -15,6 +15,13 @@
 #include <errno.h>
 #include <ctype.h>
 
+#ifdef __CYGWIN__
+#include <windows.h>
+#include <io.h>
+#include <sys/socket.h> // cygwin defines FIONREAD in  socket.h  instead of  ioctl.h
+#endif
+
+
 /* Macros for converting between hex and binary. */
 #define NIBBLE(x)	   (isdigit(x) ? (x)-'0' : tolower(x)+10-'a')
 #define HEX(buffer)	 ((NIBBLE((buffer)[0])<<4) + NIBBLE((buffer)[1]))
@@ -32,6 +39,7 @@ unsigned char *boot_data;
 
 int tty_select(int fd, unsigned int us)
 {
+#ifndef __CYGWIN__
 	fd_set fds_read;
 	struct timeval tv;
 	int r;
@@ -46,6 +54,38 @@ int tty_select(int fd, unsigned int us)
 	} else {
 		return (errno == EBADF)? -1 : 0; 
 	}
+#else
+	HANDLE hComm;
+	COMSTAT comm_stat;
+	DWORD comm_errors;
+	LARGE_INTEGER frequency;        // ticks per second
+	LARGE_INTEGER t1, t2;           // ticks
+
+	//Converting file number to OS filehandle
+	hComm=get_osfhandle(fd);
+	if (hComm==INVALID_HANDLE_VALUE){
+		fprintf(stderr,"get_osfhandle error.\n");
+		return -1;
+	}
+	//Setting up timer
+	// get ticks per second
+	QueryPerformanceFrequency(&frequency);
+	// start timer
+	QueryPerformanceCounter(&t1);
+	do{
+		if (ClearCommError(hComm, &comm_errors, &comm_stat)){
+			if (comm_stat.cbInQue)
+				return 1;
+		}
+		else
+			return -1;
+		//Check timer
+		QueryPerformanceCounter(&t2);
+		//compute time in usec and check timeout
+    		if ( (t2.QuadPart - t1.QuadPart) * 1000000 / frequency.QuadPart > us )
+			return 0;	
+	}while (1);
+#endif
 }
 
 int tty_poll(int dev)
@@ -81,7 +121,7 @@ int rtty_set(int fd, int bpsconst)
 	struct termios opts;
 	tcgetattr(fd,&opts);
 	cfmakeraw(&opts);
-	opts.c_cflag |= CS8|CSTOPB;
+	opts.c_cflag = CS8|CREAD|CLOCAL;
 	cfsetispeed(&opts,bpsconst);
 	cfsetospeed(&opts,bpsconst);
 	tcsetattr(fd, TCSADRAIN, &opts);
@@ -494,7 +534,7 @@ int mdr_boot_load(int dev, uint8_t *bfr) {
 	return 1;
 }
 
-int mdr_boot(int dev, uint8_t *data, int len, int base_addr) {
+int mdr_boot(int dev, uint8_t *data, int len, int base_addr, uint8_t run_fw) {
 	int r;
 	printf("erase eeprom\n");
 	r = mdr_boot_erase(dev);
@@ -512,10 +552,36 @@ int mdr_boot(int dev, uint8_t *data, int len, int base_addr) {
 		data += 256;
 		len -= 256;
 	}
-	printf("running firmware\n");
-	r = mdr_boot_run(dev, base_addr);
-	if(r < 0) return -1;
+	if(run_fw){
+		printf("running firmware\n");
+		r = mdr_boot_run(dev, base_addr);
+		if(r < 0) return -1;
+	}
 	return 1;
+}
+
+void print_help(void){
+	printf("Bootstrap loader for MDR32F9Q2I, К1986ВЕ92QI, 1986ВЕ9x microcontrollers.\n"
+		"It uses factory boot loader burned in MCU boot sector to load next stage\n"
+		"loader 1986_BOOT_UART.hex into RAM, which, in turn, can load custom\n "
+		"firmware, burn it into EEPROM and run.\n"
+		"\n"
+		"Usage:\n"
+		"-s 115200\n"
+		"    set upload baud rate\n"
+		"-d /dev/ttyUSB0\n"
+		"    set serial device\n"
+		"-b 1986_BOOT_UART.hex\n"
+		"    set stage 2 loader hex image\n"
+		"-f firmware_filename\n"
+		"    set user custom firmware hex image\n"
+		"-r\n"
+		"    run firmware after burning\n"
+		"All parameters are mandatory, except '-r'\n"
+		"\n"
+		"Example:\n"
+		"./mdrbootstrap -s 115200 -d /dev/ttyUSB0 -b 1986_BOOT_UART.hex -f 1986BE9x_Demo.hex\n");
+
 }
 
 int main(int argc, char **argv)
@@ -528,26 +594,35 @@ int main(int argc, char **argv)
 	int r;
 	struct timespec delay;
 	struct timeval timev,timev0;
+	uint8_t run_fw=0;
+
+	r = cmdarg(argc,argv,"-r");
+	if(r>0) {
+		run_fw=1;
+	}
 
 	r = cmdarg(argc,argv,"-b");
 	if(r>0) {
 		boot_fn = argv[r+1];
 	} else {
-		printf("-b boot.hex\n");
+		print_help();
+		printf("Parameter not specified: -b \n");
 		exit(-1);
 	}
 	r = cmdarg(argc,argv,"-f");
 	if(r>0) {
 		fw_fn = argv[r+1];
 	} else {
-		printf("-f firmware.hex\n");
+		print_help();
+		printf("Parameter not specified: -f \n");
 		exit(-1);
 	}
 	r = cmdarg(argc,argv,"-d");
 	if(r>0) {
 		dev_fn = argv[r+1];
 	} else {
-		printf("-d /dev/ttyS?\n");
+		print_help();
+		printf("Parameter not specified: -d \n");
 		exit(-1);
 	}
 	dev = open(dev_fn, O_RDWR | O_NONBLOCK);
@@ -573,9 +648,13 @@ int main(int argc, char **argv)
 	//print_hex(fw_data, fw_base, fw_len);
 	printf("read .hex firmware\nbase=%08X, len=%i\n", fw_base, fw_len);
 	r = mdr_uart(dev, bps, boot_data, boot_len, boot_base);
-	if(r > 0) mdr_boot(dev, fw_data, fw_len, fw_base);
+	if(r > 0) 
+		r=mdr_boot(dev, fw_data, fw_len, fw_base, run_fw);
 	close(dev);
-	return 0;
+	if (r>0)
+		return 0;
+	else
+		return -1;
 }
 
 /*
